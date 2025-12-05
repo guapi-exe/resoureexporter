@@ -1,5 +1,5 @@
 modLoader = "javafml"
-loaderVersion = "[10,)"
+loaderVersion = "[4.0.42,)"
 #issueTrackerURL = ""
 license = "Insert License Here"
 
@@ -16,21 +16,21 @@ exporter your mods resources!
 [[dependencies.resoureexporter]]
 modId = "neoforge"
 type = "required"
-versionRange = "[21.10,)"
+versionRange = "[21.1,)"
 ordering = "NONE"
 side = "BOTH"
 
 [[dependencies.resoureexporter]]
 modId = "minecraft"
 type = "required"
-versionRange = "[1.21.10,)"
+versionRange = "[1.21.1,)"
 ordering = "NONE"
 side = "BOTH"
 
 [[dependencies.resoureexporter]]
 modId = "architectury"
 type = "required"
-versionRange = "[18.0.6,)"
+versionRange = "[13.0.8,)"
 ordering = "AFTER"
 side = "BOTH"
 

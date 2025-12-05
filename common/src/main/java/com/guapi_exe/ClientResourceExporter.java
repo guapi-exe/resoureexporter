@@ -5,18 +5,22 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mojang.blaze3d.platform.Lighting;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.Screenshot;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 
@@ -40,7 +44,6 @@ public class ClientResourceExporter {
 
         Map<ResourceLocation, Resource> blockStates = manager.listResources("blockstates", l -> l.getPath().endsWith(".json"));
         Map<ResourceLocation, Resource> blockModels = manager.listResources("models", l -> !l.getPath().contains("models/item/"));
-        // Scan item models
         Map<ResourceLocation, Resource> itemModels = manager.listResources("models/item", l -> true);
         Map<ResourceLocation, Resource> blockTextures = manager.listResources("textures/block", l -> l.getPath().endsWith(".png"));
         Map<ResourceLocation, Resource> itemTextures = manager.listResources("textures/item", l -> l.getPath().endsWith(".png"));
@@ -72,12 +75,6 @@ public class ClientResourceExporter {
                 collectMtlTextures(manager, blockModels, namespace, allTextures);
                 collectMtlTextures(manager, itemModels, namespace, allTextures);
 
-                if (!allTextures.isEmpty()) {
-                    allTextures.sort((a, b) -> Integer.compare(b.image.getHeight(), a.image.getHeight()));
-                    exportAtlas(allTextures, modExportDir);
-                    exportIcons(allTextures, modExportDir, "original");
-                }
-
                 exportMetadata(modExportDir, namespace);
 
                 feedback.accept(Component.literal("Rendering icons for " + namespace + "..."));
@@ -92,7 +89,6 @@ public class ClientResourceExporter {
     }
 
     private static void exportRenderedIcons(File exportDir, String namespace, Consumer<Component> feedback) {
-        // Create and open the icon exporter screen
         Minecraft mc = Minecraft.getInstance();
 
         List<ItemStack> itemsToExport = new ArrayList<>();
@@ -109,23 +105,20 @@ public class ClientResourceExporter {
         }
 
         IconExporterScreen screen = new IconExporterScreen(itemsToExport, exportDir, namespace, feedback);
-        mc.setScreen(screen);
+        mc.execute(() -> mc.setScreen(screen));
     }
 
-    /**
-     * Screen for exporting item icons by rendering them and taking screenshots
-     */
     public static class IconExporterScreen extends Screen {
-        private static final int BACKGROUND_COLOR = (255 << 24) | (254 << 16) | (255 << 8) | 255; // ARGB
-        private static final int BACKGROUND_COLOR_SHIFTED = (255 << 24) | (255 << 16) | (255 << 8) | 254; // For NativeImage (ABGR)
+        private static final int BACKGROUND_COLOR = (255 << 24) | (254 << 16) | (255 << 8) | 255; // 0xFFFEFFFF
+        private static final int BACKGROUND_COLOR_SHIFTED = (255 << 24) | (255 << 16) | (255 << 8) | 254;
 
         private final List<ItemStack> itemsToExport;
         private final File exportDir;
-        @SuppressWarnings("unused")
         private final String namespace;
         private final Consumer<Component> feedback;
         private int currentIndex = 0;
-        private final int scale = 32;
+        private final int iconSize = 32;
+        private final float scale;
 
         public IconExporterScreen(List<ItemStack> items, File exportDir, String namespace, Consumer<Component> feedback) {
             super(Component.literal("Icon Exporter"));
@@ -133,15 +126,22 @@ public class ClientResourceExporter {
             this.exportDir = exportDir;
             this.namespace = namespace;
             this.feedback = feedback;
+            Minecraft mc = Minecraft.getInstance();
+            this.scale = (float) (iconSize / mc.getWindow().getGuiScale());
         }
 
         @Override
         public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
-            guiGraphics.fill(0, 0, scale, scale, BACKGROUND_COLOR);
-
             if (currentIndex >= itemsToExport.size()) {
+                try {
+                    generateRenderedAtlas(exportDir);
+                    feedback.accept(Component.literal("Exported " + itemsToExport.size() + " rendered icons and atlas"));
+                } catch (Exception e) {
+                    System.err.println("Failed to generate rendered atlas: " + e.getMessage());
+                    e.printStackTrace();
+                    feedback.accept(Component.literal("Exported " + itemsToExport.size() + " rendered icons (atlas failed)"));
+                }
                 Minecraft.getInstance().setScreen(null);
-                feedback.accept(Component.literal("Exported " + itemsToExport.size() + " rendered icons"));
                 return;
             }
 
@@ -153,67 +153,174 @@ public class ClientResourceExporter {
             }
 
             try {
-                // Render the item using GuiGraphics (simpler API that works in 1.21+)
-                renderItemScaled(guiGraphics, stack, 0, 0, scale);
+                int scaleRounded = (int) Math.ceil(scale);
+                guiGraphics.fill(0, 0, scaleRounded, scaleRounded, BACKGROUND_COLOR);
 
-                // Take screenshot and save
-                exportImageFromScreenshot(exportDir, id.getPath(), scale, BACKGROUND_COLOR_SHIFTED);
+                renderItem(guiGraphics, stack, scale);
+
+                exportImageFromScreenshot(exportDir, id.getPath(), iconSize, BACKGROUND_COLOR_SHIFTED);
             } catch (Exception e) {
-                // Skip items that fail
-                System.err.println("Failed to render " + id + ": " + e.getMessage());
+                System.err.println("Failed to export " + id + ": " + e.getMessage());
+                e.printStackTrace();
             }
 
             currentIndex++;
         }
 
-        private void renderItemScaled(GuiGraphics guiGraphics, ItemStack itemStack, int x, int y, float scale) {
-            var poseStack = guiGraphics.pose();
-            poseStack.pushMatrix();
-
-            float scaleFactor = scale / 16.0f;
-            poseStack.scale(scaleFactor, scaleFactor);
-
-            guiGraphics.renderItem(itemStack, x, y);
-
-            poseStack.popMatrix();
+        @Override
+        protected void renderBlurredBackground(float partialTicks) {
         }
 
-        private void exportImageFromScreenshot(File dir, String baseFilename, int scaleImage, int backgroundColor) {
-            RenderTarget target = Minecraft.getInstance().getMainRenderTarget();
-            NativeImage imageFull = new NativeImage(target.width, target.height, false);
+        /**
+         * Render item at specified scale.
+         * Based on IconExporter's ItemRenderUtil.
+         */
+        private void renderItem(GuiGraphics gui, ItemStack itemStack, float scale) {
+            var poseStack = gui.pose();
+            poseStack.pushPose();
 
-            try {
-                NativeImage image = getSubImage(imageFull, scaleImage, scaleImage);
-                imageFull.close();
+            poseStack.scale(scale / 16, scale / 16, 1);
+            poseStack.translate(0, 0, 100);
+            poseStack.translate(8, 8, 0);
+            poseStack.mulPose(new org.joml.Matrix4f().scaling(1, -1, 1));
+            poseStack.scale(16, 16, 16);
 
-                for (int cx = 0; cx < image.getWidth(); cx++) {
-                    for (int cy = 0; cy < image.getHeight(); cy++) {
-                        int color = image.getPixel(cx, cy);
-                        if (color == backgroundColor) {
-                            image.setPixel(cx, cy, 0);
-                        }
+            Minecraft mc = Minecraft.getInstance();
+            var bufferSource = mc.renderBuffers().bufferSource();
+            BakedModel model = mc.getItemRenderer().getModel(itemStack, null, null, 0);
+
+            boolean useFlatLighting = !model.usesBlockLight();
+            if (useFlatLighting) {
+                Lighting.setupForFlatItems();
+            }
+
+            mc.getItemRenderer().render(itemStack, ItemDisplayContext.GUI, false, poseStack, bufferSource,
+                    15728880, OverlayTexture.NO_OVERLAY, model);
+            bufferSource.endBatch();
+            RenderSystem.enableDepthTest();
+
+            if (useFlatLighting) {
+                Lighting.setupFor3DItems();
+            }
+
+            poseStack.popPose();
+            Lighting.setupFor3DItems();
+        }
+
+        /**
+         * Take screenshot and export to file.
+         * Based on IconExporter's ImageExportUtil.
+         */
+        private void exportImageFromScreenshot(File dir, String baseFilename, int scaleImage, int backgroundColor) throws IOException {
+            // Take a screenshot using Minecraft's Screenshot utility
+            NativeImage imageFull = Screenshot.takeScreenshot(Minecraft.getInstance().getMainRenderTarget());
+            NativeImage image = getSubImage(imageFull, scaleImage, scaleImage);
+            imageFull.close();
+
+            for (int cx = 0; cx < image.getWidth(); cx++) {
+                for (int cy = 0; cy < image.getHeight(); cy++) {
+                    int color = image.getPixelRGBA(cx, cy);
+                    if (color == backgroundColor) {
+                        image.setPixelRGBA(cx, cy, 0);
                     }
                 }
-
-                File iconsDir = new File(dir, "icons/rendered");
-                iconsDir.mkdirs();
-                File file = new File(iconsDir, baseFilename + ".png");
-                image.writeToFile(file);
-                image.close();
-            } catch (Exception e) {
-                System.err.println("Failed to process screenshot for " + baseFilename + ": " + e.getMessage());
-                imageFull.close();
             }
+
+            File iconsDir = new File(dir, "icons/rendered");
+            iconsDir.mkdirs();
+            File file = new File(iconsDir, baseFilename + ".png");
+            image.writeToFile(file);
+            image.close();
         }
 
+        /**
+         * Extract sub-image from top-left corner.
+         */
         private NativeImage getSubImage(NativeImage image, int width, int height) {
             NativeImage imageNew = new NativeImage(width, height, false);
             for (int y = 0; y < height && y < image.getHeight(); y++) {
                 for (int x = 0; x < width && x < image.getWidth(); x++) {
-                    imageNew.setPixel(x, y, image.getPixel(x, y));
+                    imageNew.setPixelRGBA(x, y, image.getPixelRGBA(x, y));
                 }
             }
             return imageNew;
+        }
+
+        private void generateRenderedAtlas(File exportDir) throws IOException {
+            File renderedDir = new File(exportDir, "icons/rendered");
+            if (!renderedDir.exists()) return;
+
+            List<TextureEntry> textures = new ArrayList<>();
+            File[] files = renderedDir.listFiles((dir, name) -> name.endsWith(".png"));
+            if (files == null) return;
+
+            for (File file : files) {
+                try {
+                    BufferedImage img = ImageIO.read(file);
+                    if (img != null) {
+                        String name = file.getName();
+                        name = name.substring(0, name.length() - 4); // Remove .png
+                        textures.add(new TextureEntry("item:" + name, img));
+                    }
+                } catch (Exception e) {
+                    System.err.println("Failed to read rendered icon: " + file.getName());
+                }
+            }
+
+            if (textures.isEmpty()) return;
+
+            textures.sort((a, b) -> Integer.compare(b.image.getHeight(), a.image.getHeight()));
+
+            File iconsDir = new File(exportDir, "icons");
+            generateAtlasStatic(textures, iconsDir, "atlas.png", "data.min.json");
+        }
+
+        private static void generateAtlasStatic(List<TextureEntry> textures, File outputDir, String imageName, String jsonName) throws IOException {
+            int maxWidth = 4096;
+            int currentX = 0;
+            int currentY = 0;
+            int rowHeight = 0;
+
+            List<PackedTexture> packed = new ArrayList<>();
+
+            for (TextureEntry entry : textures) {
+                if (currentX + entry.image.getWidth() > maxWidth) {
+                    currentX = 0;
+                    currentY += rowHeight;
+                    rowHeight = 0;
+                }
+
+                packed.add(new PackedTexture(entry, currentX, currentY));
+                currentX += entry.image.getWidth();
+                rowHeight = Math.max(rowHeight, entry.image.getHeight());
+            }
+
+            int atlasWidth = maxWidth;
+            int atlasHeight = currentY + rowHeight;
+
+            BufferedImage atlas = new BufferedImage(atlasWidth, atlasHeight, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g = atlas.createGraphics();
+
+            JsonObject json = new JsonObject();
+
+            for (PackedTexture pt : packed) {
+                g.drawImage(pt.entry.image, pt.x, pt.y, null);
+                JsonObject entry = new JsonObject();
+                entry.addProperty("x", pt.x);
+                entry.addProperty("y", pt.y);
+                entry.addProperty("w", pt.entry.image.getWidth());
+                entry.addProperty("h", pt.entry.image.getHeight());
+                json.add(pt.entry.key, entry);
+            }
+
+            g.dispose();
+
+            outputDir.mkdirs();
+            ImageIO.write(atlas, "png", new File(outputDir, imageName));
+
+            try (Writer writer = new OutputStreamWriter(new FileOutputStream(new File(outputDir, jsonName)), StandardCharsets.UTF_8)) {
+                GSON.toJson(json, writer);
+            }
         }
     }
 
