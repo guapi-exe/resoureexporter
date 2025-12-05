@@ -5,14 +5,12 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.mojang.blaze3d.platform.Lighting;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import com.mojang.blaze3d.pipeline.TextureTarget;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
@@ -21,7 +19,6 @@ import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
-import org.joml.Matrix4f;
 
 import javax.imageio.ImageIO;
 import java.awt.Graphics2D;
@@ -29,7 +26,6 @@ import java.awt.image.BufferedImage;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 public class ClientResourceExporter {
@@ -96,100 +92,129 @@ public class ClientResourceExporter {
     }
 
     private static void exportRenderedIcons(File exportDir, String namespace, Consumer<Component> feedback) {
+        // Create and open the icon exporter screen
         Minecraft mc = Minecraft.getInstance();
 
-        CompletableFuture.runAsync(() -> {
-            try {
-                List<TextureEntry> renderedTextures = new ArrayList<>();
-                int size = 32;
-
-                RenderTarget target = new TextureTarget(size, size, true, Minecraft.ON_OSX);
-                target.setClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-
-                RenderSystem.assertOnRenderThread();
-
-                for (Item item : BuiltInRegistries.ITEM) {
-                    ResourceLocation id = BuiltInRegistries.ITEM.getKey(item);
-                    if (!id.getNamespace().equals(namespace)) continue;
-
-                    ItemStack stack = new ItemStack(item);
-
-                    target.clear(Minecraft.ON_OSX);
-                    target.bindWrite(true);
-
-                    RenderSystem.backupProjectionMatrix();
-                    Matrix4f projection = new Matrix4f().setOrtho(0, size, size, 0, -1000, 3000);
-                    RenderSystem.setProjectionMatrix(projection, com.mojang.blaze3d.vertex.VertexSorting.ORTHOGRAPHIC_Z);
-
-                    PoseStack modelViewStack = RenderSystem.getModelViewStack();
-                    modelViewStack.pushPose();
-                    modelViewStack.setIdentity();
-                    RenderSystem.applyModelViewMatrix();
-
-                    Lighting.setupFor3DItems();
-                    RenderSystem.enableDepthTest();
-                    RenderSystem.disableCull();
-                    RenderSystem.enableBlend();
-                    RenderSystem.defaultBlendFunc();
-                    RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
-
-                    GuiGraphics graphics = new GuiGraphics(mc, mc.renderBuffers().bufferSource());
-                    graphics.pose().pushPose();
-                    float scale = size / 16f;
-                    graphics.pose().scale(scale, scale, 1.0f);
-
-                    try {
-                        graphics.renderItem(stack, 0, 0);
-                    } catch (Exception e) {
-                    }
-
-                    graphics.pose().popPose();
-                    mc.renderBuffers().bufferSource().endBatch();
-                    NativeImage nativeImage = new NativeImage(size, size, true);
-                    RenderSystem.bindTexture(target.getColorTextureId());
-                    nativeImage.downloadTexture(0, false);
-                    nativeImage.flipY();
-
-                    BufferedImage bufferedImage = nativeImageToBufferedImage(nativeImage);
-                    renderedTextures.add(new TextureEntry(id.toString(), bufferedImage));
-
-                    nativeImage.close();
-
-                    modelViewStack.popPose();
-                    RenderSystem.applyModelViewMatrix();
-                    RenderSystem.restoreProjectionMatrix();
-                }
-
-                target.destroyBuffers();
-
-                if (!renderedTextures.isEmpty()) {
-                    renderedTextures.sort((a, b) -> Integer.compare(b.image.getHeight(), a.image.getHeight()));
-                    exportIcons(renderedTextures, exportDir, "rendered");
-                }
-
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }, mc).join();
-    }
-
-    private static BufferedImage nativeImageToBufferedImage(NativeImage nativeImage) {
-        int width = nativeImage.getWidth();
-        int height = nativeImage.getHeight();
-        BufferedImage bufferedImage = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int rgba = nativeImage.getPixelRGBA(x, y);
-                int a = (rgba >> 24) & 0xFF;
-                int b = (rgba >> 16) & 0xFF;
-                int g = (rgba >> 8) & 0xFF;
-                int r = (rgba >> 0) & 0xFF;
-
-                int argb = (a << 24) | (r << 16) | (g << 8) | (b << 0);
-                bufferedImage.setRGB(x, y, argb);
+        List<ItemStack> itemsToExport = new ArrayList<>();
+        for (Item item : BuiltInRegistries.ITEM) {
+            ResourceLocation id = BuiltInRegistries.ITEM.getKey(item);
+            if (id.getNamespace().equals(namespace)) {
+                itemsToExport.add(new ItemStack(item));
             }
         }
-        return bufferedImage;
+
+        if (itemsToExport.isEmpty()) {
+            feedback.accept(Component.literal("No items to render for " + namespace));
+            return;
+        }
+
+        IconExporterScreen screen = new IconExporterScreen(itemsToExport, exportDir, namespace, feedback);
+        mc.setScreen(screen);
+    }
+
+    /**
+     * Screen for exporting item icons by rendering them and taking screenshots
+     */
+    public static class IconExporterScreen extends Screen {
+        private static final int BACKGROUND_COLOR = (255 << 24) | (254 << 16) | (255 << 8) | 255; // ARGB
+        private static final int BACKGROUND_COLOR_SHIFTED = (255 << 24) | (255 << 16) | (255 << 8) | 254; // For NativeImage (ABGR)
+
+        private final List<ItemStack> itemsToExport;
+        private final File exportDir;
+        @SuppressWarnings("unused")
+        private final String namespace;
+        private final Consumer<Component> feedback;
+        private int currentIndex = 0;
+        private final int scale = 32;
+
+        public IconExporterScreen(List<ItemStack> items, File exportDir, String namespace, Consumer<Component> feedback) {
+            super(Component.literal("Icon Exporter"));
+            this.itemsToExport = items;
+            this.exportDir = exportDir;
+            this.namespace = namespace;
+            this.feedback = feedback;
+        }
+
+        @Override
+        public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+            guiGraphics.fill(0, 0, scale, scale, BACKGROUND_COLOR);
+
+            if (currentIndex >= itemsToExport.size()) {
+                Minecraft.getInstance().setScreen(null);
+                feedback.accept(Component.literal("Exported " + itemsToExport.size() + " rendered icons"));
+                return;
+            }
+
+            ItemStack stack = itemsToExport.get(currentIndex);
+            ResourceLocation id = BuiltInRegistries.ITEM.getKey(stack.getItem());
+
+            if (currentIndex % 100 == 0) {
+                feedback.accept(Component.literal("Rendering item " + currentIndex + "/" + itemsToExport.size() + "..."));
+            }
+
+            try {
+                // Render the item using GuiGraphics (simpler API that works in 1.21+)
+                renderItemScaled(guiGraphics, stack, 0, 0, scale);
+
+                // Take screenshot and save
+                exportImageFromScreenshot(exportDir, id.getPath(), scale, BACKGROUND_COLOR_SHIFTED);
+            } catch (Exception e) {
+                // Skip items that fail
+                System.err.println("Failed to render " + id + ": " + e.getMessage());
+            }
+
+            currentIndex++;
+        }
+
+        private void renderItemScaled(GuiGraphics guiGraphics, ItemStack itemStack, int x, int y, float scale) {
+            var poseStack = guiGraphics.pose();
+            poseStack.pushMatrix();
+
+            float scaleFactor = scale / 16.0f;
+            poseStack.scale(scaleFactor, scaleFactor);
+
+            guiGraphics.renderItem(itemStack, x, y);
+
+            poseStack.popMatrix();
+        }
+
+        private void exportImageFromScreenshot(File dir, String baseFilename, int scaleImage, int backgroundColor) {
+            RenderTarget target = Minecraft.getInstance().getMainRenderTarget();
+            NativeImage imageFull = new NativeImage(target.width, target.height, false);
+
+            try {
+                NativeImage image = getSubImage(imageFull, scaleImage, scaleImage);
+                imageFull.close();
+
+                for (int cx = 0; cx < image.getWidth(); cx++) {
+                    for (int cy = 0; cy < image.getHeight(); cy++) {
+                        int color = image.getPixel(cx, cy);
+                        if (color == backgroundColor) {
+                            image.setPixel(cx, cy, 0);
+                        }
+                    }
+                }
+
+                File iconsDir = new File(dir, "icons/rendered");
+                iconsDir.mkdirs();
+                File file = new File(iconsDir, baseFilename + ".png");
+                image.writeToFile(file);
+                image.close();
+            } catch (Exception e) {
+                System.err.println("Failed to process screenshot for " + baseFilename + ": " + e.getMessage());
+                imageFull.close();
+            }
+        }
+
+        private NativeImage getSubImage(NativeImage image, int width, int height) {
+            NativeImage imageNew = new NativeImage(width, height, false);
+            for (int y = 0; y < height && y < image.getHeight(); y++) {
+                for (int x = 0; x < width && x < image.getWidth(); x++) {
+                    imageNew.setPixel(x, y, image.getPixel(x, y));
+                }
+            }
+            return imageNew;
+        }
     }
 
     private static void exportBlockDefinitions(Map<ResourceLocation, Resource> resources, File exportDir, String namespace) throws IOException {
@@ -476,14 +501,16 @@ public class ClientResourceExporter {
                     if (texturePath != null && !texturePath.isEmpty()) {
                         ResourceLocation texLoc;
                         if (texturePath.contains(":")) {
-                            texLoc = new ResourceLocation(texturePath);
+                            String[] parts = texturePath.split(":", 2);
+                            texLoc = ResourceLocation.tryBuild(parts[0], parts[1]);
                         } else {
-                            texLoc = new ResourceLocation(namespace, texturePath);
+                            texLoc = ResourceLocation.tryBuild(namespace, texturePath);
                         }
+                        if (texLoc == null) continue;
 
                         Optional<Resource> res = manager.getResource(texLoc);
                         if (res.isEmpty() && !texLoc.getPath().startsWith("textures/")) {
-                            texLoc = new ResourceLocation(texLoc.getNamespace(), "textures/" + texLoc.getPath());
+                            texLoc = texLoc.withPath("textures/" + texLoc.getPath());
                             res = manager.getResource(texLoc);
                         }
 
