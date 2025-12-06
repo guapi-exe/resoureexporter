@@ -1,7 +1,6 @@
 package com.guapi_exe;
 
 import dev.architectury.platform.Platform;
-import dev.architectury.utils.Env;
 import net.fabricmc.api.EnvType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
