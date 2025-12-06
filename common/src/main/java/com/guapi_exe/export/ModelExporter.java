@@ -74,7 +74,10 @@ public final class ModelExporter {
             if (path.endsWith(".json")) {
                 hasData |= exportJsonModel(entry, root, location, path, "models/");
             } else if (path.endsWith(".obj")) {
+                // Export OBJ as JSON for model data
                 hasData |= exportObjModel(entry, root, path, "models/");
+                // Also export raw OBJ file
+                exportRawFile(entry, exportDir, namespace, path);
             } else if (path.endsWith(".mtl")) {
                 exportRawFile(entry, exportDir, namespace, path);
             }
@@ -107,7 +110,10 @@ public final class ModelExporter {
             if (path.endsWith(".json")) {
                 hasData |= exportJsonModel(entry, root, location, path, "models/");
             } else if (path.endsWith(".obj")) {
+                // Export OBJ as JSON for model data
                 hasData |= exportObjModel(entry, root, path, "models/");
+                // Also export raw OBJ file
+                exportRawFile(entry, exportDir, namespace, path);
             } else if (path.endsWith(".mtl")) {
                 exportRawFile(entry, exportDir, namespace, path);
             }

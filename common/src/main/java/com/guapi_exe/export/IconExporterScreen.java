@@ -36,24 +36,26 @@ public class IconExporterScreen extends Screen {
     private final File exportDir;
     private final String namespace;
     private final Consumer<Component> feedback;
+    private final Runnable onComplete;
     private final float scale;
     private final int iconSize;
     private final int itemsPerFrame;
     private int currentIndex = 0;
     private int lastReportedProgress = -1;
 
-    public IconExporterScreen(List<ItemStack> items, File exportDir, String namespace, Consumer<Component> feedback) {
+    public IconExporterScreen(List<ItemStack> items, File exportDir, String namespace,
+                              Consumer<Component> feedback, Runnable onComplete) {
         super(Component.literal("Icon Exporter"));
         this.itemsToExport = items;
         this.exportDir = exportDir;
         this.namespace = namespace;
         this.feedback = feedback;
-        
-        // Get settings from ExportSettings
+        this.onComplete = onComplete;
+
         ExportSettings settings = ExportSettings.getInstance();
         this.iconSize = settings.getIconSize();
         this.itemsPerFrame = settings.getItemsPerFrame();
-        
+
         Minecraft mc = Minecraft.getInstance();
         this.scale = (float) (iconSize / mc.getWindow().getGuiScale());
     }
@@ -79,7 +81,7 @@ public class IconExporterScreen extends Screen {
 
                 // Flush the render buffer to ensure item is rendered
                 Minecraft.getInstance().renderBuffers().bufferSource().endBatch();
-                
+
                 exportImageFromScreenshot(exportDir, id.getPath(), iconSize, BACKGROUND_COLOR_SHIFTED);
             } catch (Exception e) {
                 ExporterLogger.error("Failed to export {}: {}", id, e.getMessage());
@@ -89,7 +91,6 @@ public class IconExporterScreen extends Screen {
             itemsProcessed++;
         }
 
-        // Report progress every 10%
         int progressPercent = (currentIndex * 100) / itemsToExport.size();
         int progressDecile = progressPercent / 10;
         if (progressDecile != lastReportedProgress) {
@@ -106,13 +107,17 @@ public class IconExporterScreen extends Screen {
     private void finishExport() {
         try {
             generateRenderedAtlas(exportDir);
-            feedback.accept(Component.literal("Exported " + itemsToExport.size() + " rendered icons and atlas"));
+            feedback.accept(Component.literal("Exported " + itemsToExport.size() + " rendered icons and atlas for " + namespace));
             ExporterLogger.info("Exported {} rendered icons for {}", itemsToExport.size(), namespace);
         } catch (Exception e) {
             ExporterLogger.error("Failed to generate rendered atlas: {}", e.getMessage());
             feedback.accept(Component.literal("Exported " + itemsToExport.size() + " rendered icons (atlas failed)"));
         }
+
         Minecraft.getInstance().setScreen(null);
+        if (onComplete != null) {
+            Minecraft.getInstance().execute(onComplete);
+        }
     }
 
     /**
@@ -204,8 +209,8 @@ public class IconExporterScreen extends Screen {
                 BufferedImage img = ImageIO.read(file);
                 if (img != null) {
                     String name = file.getName();
-                    name = name.substring(0, name.length() - 4); // Remove .png
-                    textures.add(new TextureEntry("item:" + name, img));
+                    name = name.substring(0, name.length() - 4);
+                    textures.add(new TextureEntry(this.namespace + ":" + name, img));
                 }
             } catch (Exception e) {
                 ExporterLogger.warn("Failed to read rendered icon: {}", file.getName());
@@ -215,6 +220,6 @@ public class IconExporterScreen extends Screen {
         if (textures.isEmpty()) return;
 
         File iconsDir = new File(exportDir, "icons");
-        AtlasGenerator.generateAtlasDetailed(textures, iconsDir, "atlas.png", "data.min.json");
+        AtlasGenerator.generateAtlas(textures, iconsDir, "atlas.png", "data.min.json");
     }
 }

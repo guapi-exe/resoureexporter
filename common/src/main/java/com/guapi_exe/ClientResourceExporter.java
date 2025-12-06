@@ -23,6 +23,18 @@ import java.util.function.Consumer;
  * Coordinates the export of block/item definitions, models, textures and icons.
  */
 public class ClientResourceExporter {
+    
+    // Queue for processing namespaces sequentially
+    private static Queue<String> namespaceQueue = new LinkedList<>();
+    private static Map<ResourceLocation, Resource> currentBlockStates;
+    private static Map<ResourceLocation, Resource> currentBlockModels;
+    private static Map<ResourceLocation, Resource> currentItemModels;
+    private static Map<ResourceLocation, Resource> currentBlockTextures;
+    private static Map<ResourceLocation, Resource> currentItemTextures;
+    private static File currentBaseExportDir;
+    private static Consumer<Component> currentFeedback;
+    private static int totalNamespaces;
+    private static int processedNamespaces;
 
     private ClientResourceExporter() {
         // Utility class, no instantiation
@@ -37,21 +49,22 @@ public class ClientResourceExporter {
     public static void export(String namespaceFilter, Consumer<Component> feedback) {
         Minecraft mc = Minecraft.getInstance();
         ResourceManager manager = mc.getResourceManager();
-        File baseExportDir = new File(mc.gameDirectory, "resource_exports");
+        currentBaseExportDir = new File(mc.gameDirectory, "resource_exports");
+        currentFeedback = feedback;
 
         ExporterLogger.info("Starting resource export...");
         feedback.accept(Component.literal("Scanning resources..."));
 
         // Collect all resource maps
-        Map<ResourceLocation, Resource> blockStates = manager.listResources("blockstates",
+        currentBlockStates = manager.listResources("blockstates",
                 l -> l.getPath().endsWith(".json"));
-        Map<ResourceLocation, Resource> blockModels = manager.listResources("models",
+        currentBlockModels = manager.listResources("models",
                 l -> !l.getPath().contains("models/item/"));
-        Map<ResourceLocation, Resource> itemModels = manager.listResources("models/item",
+        currentItemModels = manager.listResources("models/item",
                 l -> true);
-        Map<ResourceLocation, Resource> blockTextures = manager.listResources("textures/block",
+        currentBlockTextures = manager.listResources("textures/block",
                 l -> l.getPath().endsWith(".png"));
-        Map<ResourceLocation, Resource> itemTextures = manager.listResources("textures/item",
+        currentItemTextures = manager.listResources("textures/item",
                 l -> l.getPath().endsWith(".png"));
 
         // Determine namespaces to export
@@ -62,57 +75,99 @@ public class ClientResourceExporter {
             namespaces.addAll(manager.getNamespaces());
         }
 
-        int total = namespaces.size();
-        int current = 0;
+        // Initialize queue
+        namespaceQueue.clear();
+        namespaceQueue.addAll(namespaces);
+        totalNamespaces = namespaces.size();
+        processedNamespaces = 0;
 
-        for (String namespace : namespaces) {
-            current++;
-            ExporterLogger.info("Exporting mod: {} ({}/{})", namespace, current, total);
-            feedback.accept(Component.literal("Exporting mod: " + namespace + " (" + current + "/" + total + ")"));
+        // Start processing the first namespace
+        processNextNamespace();
+    }
 
-            File modExportDir = new File(baseExportDir, namespace);
-
-            try {
-                exportNamespace(namespace, modExportDir, manager, blockStates, blockModels,
-                        itemModels, blockTextures, itemTextures, feedback);
-            } catch (Exception e) {
-                ExporterLogger.error("Failed to export mod {}: {}", namespace, e.getMessage(), e);
-            }
+    /**
+     * Process the next namespace in the queue.
+     */
+    private static void processNextNamespace() {
+        if (namespaceQueue.isEmpty()) {
+            // All done
+            ExporterLogger.info("Resource export complete!");
+            currentFeedback.accept(Component.literal("Export complete!"));
+            cleanup();
+            return;
         }
 
-        ExporterLogger.info("Resource export complete!");
-        feedback.accept(Component.literal("Export complete!"));
+        String namespace = namespaceQueue.poll();
+        processedNamespaces++;
+        
+        ExporterLogger.info("Exporting mod: {} ({}/{})", namespace, processedNamespaces, totalNamespaces);
+        currentFeedback.accept(Component.literal("Exporting mod: " + namespace + " (" + processedNamespaces + "/" + totalNamespaces + ")"));
+
+        File modExportDir = new File(currentBaseExportDir, namespace);
+
+        try {
+            exportNamespace(namespace, modExportDir, Minecraft.getInstance().getResourceManager());
+        } catch (Exception e) {
+            ExporterLogger.error("Failed to export mod {}: {}", namespace, e.getMessage(), e);
+            // Continue with next namespace even if this one failed
+            processNextNamespace();
+        }
     }
 
     /**
      * Export all resources for a single namespace.
      */
-    private static void exportNamespace(String namespace, File modExportDir, ResourceManager manager,
-                                        Map<ResourceLocation, Resource> blockStates,
-                                        Map<ResourceLocation, Resource> blockModels,
-                                        Map<ResourceLocation, Resource> itemModels,
-                                        Map<ResourceLocation, Resource> blockTextures,
-                                        Map<ResourceLocation, Resource> itemTextures,
-                                        Consumer<Component> feedback) throws Exception {
+    private static void exportNamespace(String namespace, File modExportDir, ResourceManager manager) throws Exception {
         // Export definitions and models
-        ModelExporter.exportBlockDefinitions(blockStates, modExportDir, namespace);
-        ModelExporter.exportBlockModels(blockModels, modExportDir, namespace);
-        ModelExporter.exportItemModels(itemModels, modExportDir, namespace);
+        ModelExporter.exportBlockDefinitions(currentBlockStates, modExportDir, namespace);
+        ModelExporter.exportBlockModels(currentBlockModels, modExportDir, namespace);
+        ModelExporter.exportItemModels(currentItemModels, modExportDir, namespace);
         ModelExporter.exportOpaqueBlocks(modExportDir, namespace);
 
-        // Collect textures (currently unused but can be used for atlas export)
+        // Export raw texture files
+        currentFeedback.accept(Component.literal("Exporting textures for " + namespace + "..."));
+        TextureUtils.exportRawTextures(currentBlockTextures, namespace, modExportDir, "textures/block");
+        TextureUtils.exportRawTextures(currentItemTextures, namespace, modExportDir, "textures/item");
+
+        // Collect textures for atlas
+        List<TextureEntry> blockTextures = new ArrayList<>();
+        List<TextureEntry> itemTextures = new ArrayList<>();
+        TextureUtils.collectTextures(currentBlockTextures, namespace, "textures/", blockTextures);
+        TextureUtils.collectTextures(currentItemTextures, namespace, "textures/", itemTextures);
+        TextureUtils.collectMtlTextures(manager, currentBlockModels, namespace, blockTextures);
+        TextureUtils.collectMtlTextures(manager, currentItemModels, namespace, itemTextures);
+
+        // Export texture atlas to assets/atlas directory
         List<TextureEntry> allTextures = new ArrayList<>();
-        TextureUtils.collectTextures(blockTextures, namespace, "textures/", allTextures);
-        TextureUtils.collectTextures(itemTextures, namespace, "textures/", allTextures);
-        TextureUtils.collectMtlTextures(manager, blockModels, namespace, allTextures);
-        TextureUtils.collectMtlTextures(manager, itemModels, namespace, allTextures);
+        allTextures.addAll(blockTextures);
+        allTextures.addAll(itemTextures);
+        if (!allTextures.isEmpty()) {
+            currentFeedback.accept(Component.literal("Generating texture atlas for " + namespace + "..."));
+            exportTextureAtlas(allTextures, modExportDir, namespace);
+        }
 
         // Export metadata
         ModelExporter.exportMetadata(modExportDir, namespace);
 
         // Render icons
-        feedback.accept(Component.literal("Rendering icons for " + namespace + "..."));
-        exportRenderedIcons(modExportDir, namespace, feedback);
+        currentFeedback.accept(Component.literal("Rendering icons for " + namespace + "..."));
+        exportRenderedIcons(modExportDir, namespace, currentFeedback);
+    }
+
+    /**
+     * Export texture atlas to assets/atlas directory.
+     */
+    private static void exportTextureAtlas(List<TextureEntry> textures, File exportDir, String namespace) {
+        try {
+            File atlasDir = new File(exportDir, "assets/atlas");
+            atlasDir.mkdirs();
+            
+            // Generate atlas image and JSON
+            com.guapi_exe.export.AtlasGenerator.generateAtlas(textures, atlasDir, "atlas.png", "data.min.json");
+            ExporterLogger.info("Exported texture atlas with {} textures for {}", textures.size(), namespace);
+        } catch (Exception e) {
+            ExporterLogger.error("Failed to export texture atlas for {}: {}", namespace, e.getMessage());
+        }
     }
 
     /**
@@ -132,11 +187,34 @@ public class ClientResourceExporter {
         if (itemsToExport.isEmpty()) {
             ExporterLogger.info("No items to render for {}", namespace);
             feedback.accept(Component.literal("No items to render for " + namespace));
+            // Continue with next namespace
+            processNextNamespace();
             return;
         }
 
         ExporterLogger.info("Rendering {} items for {}", itemsToExport.size(), namespace);
-        IconExporterScreen screen = new IconExporterScreen(itemsToExport, exportDir, namespace, feedback);
+        
+        // Create screen with completion callback to process next namespace
+        IconExporterScreen screen = new IconExporterScreen(
+                itemsToExport, 
+                exportDir, 
+                namespace, 
+                feedback,
+                ClientResourceExporter::processNextNamespace  // Callback when done
+        );
         mc.execute(() -> mc.setScreen(screen));
+    }
+
+    /**
+     * Clean up static references after export is complete.
+     */
+    private static void cleanup() {
+        currentBlockStates = null;
+        currentBlockModels = null;
+        currentItemModels = null;
+        currentBlockTextures = null;
+        currentItemTextures = null;
+        currentBaseExportDir = null;
+        currentFeedback = null;
     }
 }

@@ -7,9 +7,7 @@ import net.minecraft.server.packs.resources.ResourceManager;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +40,35 @@ public final class TextureUtils {
                 }
             } catch (Exception e) {
                 ExporterLogger.debug("Failed to collect texture {}: {}", location, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Export raw texture files to directory.
+     */
+    public static void exportRawTextures(Map<ResourceLocation, Resource> resources, String namespace,
+                                         File exportDir, String subDir) {
+        for (Map.Entry<ResourceLocation, Resource> entry : resources.entrySet()) {
+            ResourceLocation location = entry.getKey();
+            if (!location.getNamespace().equals(namespace)) continue;
+
+            try {
+                String path = location.getPath();
+                File outputFile = new File(exportDir, "assets/" + subDir + "/" + 
+                        path.substring(path.indexOf("/") + 1)); // Remove "textures/" prefix
+                outputFile.getParentFile().mkdirs();
+                
+                try (InputStream in = entry.getValue().open();
+                     OutputStream out = new FileOutputStream(outputFile)) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        out.write(buffer, 0, read);
+                    }
+                }
+            } catch (Exception e) {
+                ExporterLogger.debug("Failed to export texture {}: {}", location, e.getMessage());
             }
         }
     }
