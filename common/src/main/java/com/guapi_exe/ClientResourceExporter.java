@@ -42,11 +42,20 @@ public class ClientResourceExporter {
 
     /**
      * Export resources for one or all namespaces.
+     * Schedules the export on the render thread to avoid thread issues.
      *
      * @param namespaceFilter If non-null, only export for this namespace
      * @param feedback        Consumer for progress messages
      */
     public static void export(String namespaceFilter, Consumer<Component> feedback) {
+        // Schedule on render thread to avoid "RenderSystem called from wrong thread"
+        Minecraft.getInstance().execute(() -> doExport(namespaceFilter, feedback));
+    }
+
+    /**
+     * Internal export method - must be called on render thread.
+     */
+    private static void doExport(String namespaceFilter, Consumer<Component> feedback) {
         Minecraft mc = Minecraft.getInstance();
         ResourceManager manager = mc.getResourceManager();
         currentBaseExportDir = new File(mc.gameDirectory, "resource_exports");
