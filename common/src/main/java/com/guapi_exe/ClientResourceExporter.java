@@ -136,9 +136,10 @@ public class ClientResourceExporter {
 
             // Generate texture atlas in assets directory
             if (!allTextures.isEmpty()) {
-                File assetsDir = new File(modExportDir, "assets");
-                assetsDir.mkdirs();
-                AtlasGenerator.generateAtlas(allTextures, assetsDir, "atlas.png", "data.min.json");
+                File atlasDir = new File(modExportDir, "assets/atlas");
+                atlasDir.mkdirs();
+
+                AtlasGenerator.generateAtlas(allTextures, atlasDir, "atlas.png", "data.min.json");
                 currentFeedback.accept(Component.literal("Generated texture atlas with " + allTextures.size() + " textures"));
             }
 

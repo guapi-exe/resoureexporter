@@ -2,6 +2,8 @@ package com.guapi_exe.export;
 
 import com.google.gson.*;
 import com.guapi_exe.util.ExporterLogger;
+import dev.architectury.platform.Mod;
+import dev.architectury.platform.Platform;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
@@ -10,9 +12,9 @@ import net.minecraft.world.level.block.Block;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
 
 /**
  * Handles exporting of block/item definitions, models, and metadata.
@@ -153,7 +155,7 @@ public final class ModelExporter {
     }
 
     /**
-     * Export metadata (items list, config).
+     * Export metadata (items list, config with mod info).
      */
     public static void exportMetadata(File exportDir, String namespace) {
         try {
@@ -181,8 +183,42 @@ public final class ModelExporter {
                 }
             }
 
+            // Build config with mod metadata
             JsonObject configJson = new JsonObject();
             configJson.addProperty("namespace", namespace);
+            
+            // Try to get mod info from Architectury Platform API
+            Optional<Mod> modOpt = Platform.getOptionalMod(namespace);
+            if (modOpt.isPresent()) {
+                Mod mod = modOpt.get();
+                configJson.addProperty("name", mod.getName());
+                configJson.addProperty("version", mod.getVersion());
+                configJson.addProperty("description", mod.getDescription());
+                
+                // Add authors
+                Collection<String> authors = mod.getAuthors();
+                if (authors != null && !authors.isEmpty()) {
+                    JsonArray authorsArray = new JsonArray();
+                    authors.forEach(authorsArray::add);
+                    configJson.add("authors", authorsArray);
+                }
+                
+                // Add license if available
+                Collection<String> license = mod.getLicense();
+                if (license != null && !license.isEmpty()) {
+                    JsonArray licenseArray = new JsonArray();
+                    license.forEach(licenseArray::add);
+                    configJson.add("license", licenseArray);
+                }
+                
+                // Add homepage if available
+                mod.getHomepage().ifPresent(homepage -> 
+                    configJson.addProperty("homepage", homepage));
+                
+                // Export mod icon
+                exportModIcon(mod, exportDir, namespace);
+            }
+            
             configJson.addProperty("blockCount", blockCount);
             configJson.addProperty("itemCount", itemCount);
 
@@ -194,6 +230,42 @@ public final class ModelExporter {
             ExporterLogger.info("Exported metadata for {} (blocks: {}, items: {})", namespace, blockCount, itemCount);
         } catch (IOException e) {
             ExporterLogger.error("Failed to export metadata for {}", namespace, e);
+        }
+    }
+
+    /**
+     * Export mod icon if available.
+     */
+    private static void exportModIcon(Mod mod, File exportDir, String namespace) {
+        try {
+            // Try to get logo file path
+            Optional<String> logoPath = mod.getLogoFile(128);
+            if (logoPath.isPresent()) {
+                // Find the resource in mod files
+                String[] pathParts = logoPath.get().split("/");
+                Optional<Path> iconResource = mod.findResource(pathParts);
+                
+                if (iconResource.isPresent()) {
+                    Path sourcePath = iconResource.get();
+                    File iconFile = new File(exportDir, "icon.png");
+                    
+                    try (InputStream in = Files.newInputStream(sourcePath);
+                         OutputStream out = new FileOutputStream(iconFile)) {
+                        byte[] buffer = new byte[8192];
+                        int read;
+                        while ((read = in.read(buffer)) != -1) {
+                            out.write(buffer, 0, read);
+                        }
+                    }
+                    ExporterLogger.info("Exported mod icon for {}", namespace);
+                } else {
+                    ExporterLogger.debug("Mod icon resource not found for {}: {}", namespace, logoPath.get());
+                }
+            } else {
+                ExporterLogger.debug("No mod icon defined for {}", namespace);
+            }
+        } catch (Exception e) {
+            ExporterLogger.warn("Failed to export mod icon for {}: {}", namespace, e.getMessage());
         }
     }
 
